@@ -1,21 +1,25 @@
-using NUnit.Framework;
 using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
-using OpenQA.Selenium.Support.UI;
-using System;
 
-namespace EmployeeDirectory.Tests;
+public IWebDriver driver;
 
-public class SeleniumTests
+[SetUp]
+public void Setup()
 {
-    private IWebDriver driver;
-    private string baseUrl = "http://18.61.228.241:5000"; // 🔴 replace
+    var options = new ChromeOptions();
 
-    [SetUp]
-    public void Setup()
-    {
-        driver = new ChromeDriver();
-    }
+    // REQUIRED for Jenkins/Linux
+    options.AddArgument("--headless=new");
+    options.AddArgument("--no-sandbox");
+    options.AddArgument("--disable-dev-shm-usage");
+    options.AddArgument("--disable-gpu");
+    options.AddArgument("--window-size=1920,1080");
+
+    // Optional but safer
+    options.AddArgument("--remote-allow-origins=*");
+
+    driver = new ChromeDriver(options);
+}
 
     // ✅ Add Employee
     [Test]
