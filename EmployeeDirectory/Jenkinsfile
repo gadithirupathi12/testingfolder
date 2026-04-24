@@ -1,0 +1,143 @@
+pipeline {
+ 
+    agent any   // runs on any available Jenkins agent
+ 
+    // ── Pipeline-level env vars ─────────────────────────────────────────────
+    environment {
+        DOTNET_CLI_TELEMETRY_OPTOUT = "1"    // no Microsoft telemetry
+        APP_PORT     = "5000"
+        VM_IP        = "${env.VM_IP ?: 'localhost'}"  // override via Jenkins param
+        APP_PID_FILE = "${WORKSPACE}/app.pid"
+        APP_LOG      = "${WORKSPACE}/app.log"
+    }
+ 
+    // ── Optional: let the user pass the VM IP when triggering the job ────────
+    parameters {
+        string(
+            name:         'VM_IP',
+            defaultValue: 'localhost',
+            description:  'IP address of the VM where the app runs (e.g. 192.168.1.100)'
+        )
+    }
+ 
+    stages {
+ 
+        // ── STAGE 1: Checkout ────────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                echo '📥 Cloning source code...'
+                // Replace the URL below with your actual Git repo URL
+                git branch: 'main',
+                    url: 'https://github.com/YOUR_ORG/YOUR_REPO.git'
+                    // credentialsId: 'github-creds'   // uncomment if private repo
+            }
+        }
+ 
+        // ── STAGE 2: Restore & Build ─────────────────────────────────────────
+        stage('Build') {
+            steps {
+                echo '🔨 Restoring NuGet packages and building...'
+                sh '''
+                    cd src/EmployeeApp
+                    dotnet restore
+                    dotnet build --configuration Release --no-restore
+                '''
+            }
+        }
+ 
+        // ── STAGE 3: Start Application ───────────────────────────────────────
+        stage('Start Application') {
+            steps {
+                echo "🚀 Starting app on http://${params.VM_IP}:${APP_PORT} ..."
+                sh '''
+                    cd src/EmployeeApp
+ 
+                    # Kill any leftover process on port 5000
+                    fuser -k 5000/tcp || true
+ 
+                    # Start the app in background and save its PID
+                    nohup dotnet run \
+                        --configuration Release \
+                        --urls="http://0.0.0.0:${APP_PORT}" \
+                        > "${APP_LOG}" 2>&1 &
+ 
+                    echo $! > "${APP_PID_FILE}"
+                    echo "App PID: $(cat ${APP_PID_FILE})"
+ 
+                    # Wait up to 30 seconds for the app to be ready
+                    READY=0
+                    for i in $(seq 1 30); do
+                        if curl -sf "http://localhost:${APP_PORT}/employees" > /dev/null; then
+                            echo "✅ App is ready (attempt ${i})"
+                            READY=1
+                            break
+                        fi
+                        echo "  Waiting... (${i})"
+                        sleep 1
+                    done
+ 
+                    if [ "$READY" -eq 0 ]; then
+                        echo "❌ App did not start in time. Log output:"
+                        cat "${APP_LOG}"
+                        exit 1
+                    fi
+                '''
+            }
+        }
+ 
+        // ── STAGE 4: Run Selenium Tests ──────────────────────────────────────
+        stage('Selenium Tests') {
+            environment {
+                VM_IP = "${params.VM_IP}"   // pass to test project
+            }
+            steps {
+                echo '🤖 Running Selenium tests...'
+                sh '''
+                    cd src/EmployeeApp.Tests
+                    dotnet test \
+                        --configuration Release \
+                        --logger "trx;LogFileName=TestResults.trx" \
+                        --results-directory "${WORKSPACE}/TestResults"
+                '''
+            }
+            post {
+                always {
+                    // Publish xUnit/TRX test results in Jenkins
+                    step([$class: 'MSTestPublisher',
+                          testResultsFile: 'TestResults/*.trx',
+                          failOnError: false])
+                }
+            }
+        }
+ 
+        // ── STAGE 5: Archive Logs & Artifacts ───────────────────────────────
+        stage('Archive') {
+            steps {
+                echo '📦 Archiving logs and test results...'
+                archiveArtifacts artifacts: 'app.log, TestResults/**/*', allowEmptyArchive: true
+            }
+        }
+    }
+ 
+    // ── POST: Always stop the app after the pipeline finishes ────────────────
+    post {
+        always {
+            echo '🛑 Stopping the application...'
+            sh '''
+                if [ -f "${APP_PID_FILE}" ]; then
+                    PID=$(cat "${APP_PID_FILE}")
+                    kill "$PID" 2>/dev/null || true
+                    echo "Stopped PID $PID"
+                    rm -f "${APP_PID_FILE}"
+                fi
+                fuser -k 5000/tcp || true
+            '''
+        }
+        success {
+            echo '🎉 Pipeline PASSED! All tests green.'
+        }
+        failure {
+            echo '💥 Pipeline FAILED. Check console output and app.log.'
+        }
+    }
+}
